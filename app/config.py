@@ -12,6 +12,10 @@ class Settings(BaseSettings):
     database_url: str
     tmdb_api_key: SecretStr
     admin_user_ids: str = ""
+    telegram_api_id: int = 0
+    telegram_api_hash: SecretStr = SecretStr("")
+    reindex_channel_id: int | None = None
+    reindex_max_messages: int = 1000
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
@@ -38,6 +42,10 @@ class Settings(BaseSettings):
     @property
     def webhook_url(self) -> str:
         return f"{self.webhook_base_url.rstrip('/')}{self.webhook_path}"
+
+    @property
+    def reindex_configured(self) -> bool:
+        return self.telegram_api_id > 0 and bool(self.telegram_api_hash.get_secret_value()) and self.reindex_channel_id is not None
 
 
 @lru_cache(maxsize=1)
