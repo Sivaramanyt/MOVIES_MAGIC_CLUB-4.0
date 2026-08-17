@@ -1,7 +1,7 @@
 import logging
 
 from telethon import TelegramClient
-from telethon.errors import RPCError
+from telethon.errors import ChannelPrivateError, ChatAdminRequiredError, RPCError, UserNotParticipantError
 from telethon.sessions import MemorySession
 from telethon.tl.types import Channel
 
@@ -26,17 +26,42 @@ class ChannelHistoryIndexer:
         )
 
     async def reindex(self, *, channel_id: int, limit: int) -> ReindexResult:
-        await self.client.start(bot_token=settings.bot_token.get_secret_value())
         try:
-            # Warm the MTProto entity cache. This is important when the channel
-            # is configured with a Bot API-style -100... channel ID.
-            await self.client.get_dialogs(limit=None)
-            entity = await self.client.get_entity(channel_id)
+            await self.client.start(bot_token=settings.bot_token.get_secret_value())
 
-            if not isinstance(entity, Channel):
-                raise RuntimeError(
-                    f"Configured reindex ID {channel_id} is not a Telegram channel"
-                )
+            me = await self.client.get_me()
+            logger.info(
+                "MTProto reindex session started: user_id=%s is_bot=%s",
+                getattr(me, "id", "unknown"),
+                getattr(me, "bot", False),
+            )
+
+            # A raw -100... Bot API channel ID is not enough by itself for
+            # MTProto: Telethon needs the channel entity/access_hash. Reading
+            # dialogs first obtains the entity when the bot is a member.
+            dialogs = await self.client.get_dialogs(limit=None)
+            entity = None
+            for dialog in dialogs:
+                candidate = getattr(dialog, "entity", None)
+                if isinstance(candidate, Channel) and int(dialog.id) == int(channel_id):
+                    entity = candidate
+                    break
+
+            if entity is None:
+                # Try the normal resolver as a fallback in case the channel was
+                # resolved but not returned as a dialog for this account.
+                try:
+                    candidate = await self.client.get_entity(int(channel_id))
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"Channel {channel_id} is not visible to the reindex Telegram account. "
+                        "Add the bot to that channel as an administrator and verify REINDEX_CHANNEL_ID."
+                    ) from exc
+                if not isinstance(candidate, Channel):
+                    raise RuntimeError(
+                        f"REINDEX_CHANNEL_ID {channel_id} does not resolve to a Telegram channel"
+                    )
+                entity = candidate
 
             logger.info(
                 "Reindexing Telegram channel id=%s title=%s limit=%s",
@@ -51,10 +76,29 @@ class ChannelHistoryIndexer:
                 return await reindex_messages(session, messages)
             finally:
                 await session.close()
+
+        except UserNotParticipantError as exc:
+            logger.exception("Reindex account is not a member of channel %s", channel_id)
+            raise RuntimeError(
+                f"The reindex Telegram account is not a member of channel {channel_id}. "
+                "Add the bot to the channel as an administrator."
+            ) from exc
+        except ChannelPrivateError as exc:
+            logger.exception("Channel %s is private/inaccessible to reindex account", channel_id)
+            raise RuntimeError(
+                f"Telegram reports channel {channel_id} is private or inaccessible. "
+                "Make sure the bot is a member/admin of the channel."
+            ) from exc
+        except ChatAdminRequiredError as exc:
+            logger.exception("Admin permission required for channel %s", channel_id)
+            raise RuntimeError(
+                f"Telegram requires administrator access to channel {channel_id}. "
+                "Promote the bot to channel administrator and retry."
+            ) from exc
         except RPCError as exc:
             logger.exception("Telegram history access failed for channel %s", channel_id)
             raise RuntimeError(
-                f"Telegram could not read channel {channel_id}: {exc.__class__.__name__}"
+                f"Telegram history access failed for channel {channel_id}: {exc.__class__.__name__}"
             ) from exc
         finally:
             await self.client.disconnect()
