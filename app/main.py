@@ -6,6 +6,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 
 from app.bot import create_bot, create_dispatcher
 from app.config import get_settings
+from app.database.session import check_database_connection, close_database
 
 settings = get_settings()
 logging.basicConfig(
@@ -30,6 +31,7 @@ async def lifespan(app: FastAPI):
     logger.info("Telegram webhook configured: %s", settings.webhook_url)
     yield
     await bot.session.close()
+    await close_database()
     logger.info("Application shutdown complete")
 
 
@@ -38,7 +40,11 @@ app = FastAPI(title="MOVIES MAGIC CLUB 4.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    database_ok = await check_database_connection()
+    return {
+        "status": "ok" if database_ok else "degraded",
+        "database": "ok" if database_ok else "unavailable",
+    }
 
 
 @app.post(settings.webhook_path)
