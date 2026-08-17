@@ -7,6 +7,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from app.bot import create_bot, create_dispatcher
 from app.config import get_settings
 from app.database.session import check_database_connection, close_database
+from app.diagnostics import get_database_diagnostics
 
 settings = get_settings()
 logging.basicConfig(
@@ -45,6 +46,21 @@ async def health() -> dict[str, str]:
         "status": "ok" if database_ok else "degraded",
         "database": "ok" if database_ok else "unavailable",
     }
+
+
+@app.get("/admin/diagnostics/database")
+async def database_diagnostics(
+    x_admin_diagnostics_token: str | None = Header(default=None),
+) -> dict:
+    """Return schema diagnostics only when the admin diagnostic token matches."""
+    if x_admin_diagnostics_token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    try:
+        return await get_database_diagnostics()
+    except Exception:
+        logger.exception("Database diagnostics failed")
+        raise HTTPException(status_code=503, detail="Database diagnostics unavailable")
 
 
 @app.post(settings.webhook_path)
