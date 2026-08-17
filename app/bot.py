@@ -86,8 +86,7 @@ async def file_test_handler(message: Message) -> None:
         await session.close()
 
 
-@router.message(F.document | F.video)
-async def telegram_file_handler(message: Message) -> None:
+async def _handle_telegram_file(message: Message) -> None:
     """Persist raw Telegram document/video metadata without grouping or TMDB."""
     session: AsyncSession = SessionLocal()
     try:
@@ -98,13 +97,15 @@ async def telegram_file_handler(message: Message) -> None:
             unique_id = file.file_unique_id
             file_size = file.file_size
             mime_type = file.mime_type
-        else:
+        elif message.video is not None:
             file = message.video
             filename = f"video_{message.message_id}.mp4"
             file_id = file.file_id
             unique_id = file.file_unique_id
             file_size = file.file_size
             mime_type = file.mime_type or "video/mp4"
+        else:
+            return
 
         repository = MovieFileRepository(session)
         row, created = await repository.create_or_get(
@@ -130,10 +131,21 @@ async def telegram_file_handler(message: Message) -> None:
             await message.answer("📥 File already indexed. No duplicate record created.")
     except Exception:
         await session.rollback()
-        # Do not let a file-processing failure break Telegram webhook delivery.
+        logger = __import__("logging").getLogger(__name__)
+        logger.exception("Telegram file intake failed")
         await message.answer("⚠️ File received, but database storage failed. Check Koyeb logs.")
     finally:
         await session.close()
+
+
+@router.message(F.document | F.video)
+async def telegram_file_message_handler(message: Message) -> None:
+    await _handle_telegram_file(message)
+
+
+@router.channel_post(F.document | F.video)
+async def telegram_file_channel_post_handler(message: Message) -> None:
+    await _handle_telegram_file(message)
 
 
 @router.message()
