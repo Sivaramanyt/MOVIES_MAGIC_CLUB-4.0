@@ -23,7 +23,7 @@ class Movie(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
     aliases: Mapped[list["MovieAlias"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
-    files: Mapped[list["MovieFile"]] = relationship(back_populates="movie", cascade="all, delete-orphan")
+    files: Mapped[list["MovieFile"]] = relationship(back_populates="movie")
 
 
 class MovieAlias(Base):
@@ -45,7 +45,7 @@ class MovieFile(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    movie_id: Mapped[int] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), nullable=False, index=True)
+    movie_id: Mapped[int | None] = mapped_column(ForeignKey("movies.id", ondelete="CASCADE"), nullable=True, index=True)
     channel_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
     message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     telegram_file_id: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -58,7 +58,7 @@ class MovieFile(Base):
     indexed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
-    movie: Mapped[Movie] = relationship(back_populates="files")
+    movie: Mapped[Movie | None] = relationship(back_populates="files")
 
 
 class User(Base):
