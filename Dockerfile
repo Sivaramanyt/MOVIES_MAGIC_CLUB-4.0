@@ -8,7 +8,9 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Copy the application and the compatibility entry point.
 COPY app ./app
+COPY bot.py ./bot.py
 
 EXPOSE 8000
 
