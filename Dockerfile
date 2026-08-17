@@ -8,8 +8,10 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the application and the compatibility entry point.
+# Copy the application, database migrations, and compatibility entry point.
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
 COPY bot.py ./bot.py
 
 EXPOSE 8000
