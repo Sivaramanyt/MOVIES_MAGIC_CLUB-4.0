@@ -2,10 +2,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import MovieFile
+from app.parser.filename_parser import ParsedFilename
 
 
 class MovieFileRepository:
-    """Persistence for raw Telegram file metadata before movie grouping."""
+    """Persistence for Telegram files and parsed metadata before movie grouping."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -19,16 +20,36 @@ class MovieFileRepository:
         )
         return result.scalar_one_or_none()
 
-    async def create_or_get(self, *, channel_id: int, message_id: int, telegram_file_id: str, file_unique_id: str | None, filename: str, file_size: int | None, mime_type: str | None) -> tuple[MovieFile, bool]:
+    async def create_or_get(
+        self,
+        *,
+        channel_id: int,
+        message_id: int,
+        telegram_file_id: str,
+        file_unique_id: str | None,
+        filename: str,
+        file_size: int | None,
+        mime_type: str | None,
+        parsed: ParsedFilename | None = None,
+    ) -> tuple[MovieFile, bool]:
         existing = await self.get_by_channel_message(channel_id, message_id)
         if existing is not None:
             return existing, False
+
         row = MovieFile(
             channel_id=channel_id,
             message_id=message_id,
             telegram_file_id=telegram_file_id,
             file_unique_id=file_unique_id,
             filename=filename,
+            parsed_title=parsed.title if parsed else None,
+            parsed_year=parsed.year if parsed else None,
+            language=parsed.language if parsed else None,
+            quality=parsed.quality if parsed else None,
+            source=parsed.source if parsed else None,
+            codec=parsed.codec if parsed else None,
+            audio=parsed.audio if parsed else None,
+            extension=parsed.extension if parsed else None,
             file_size=file_size,
             mime_type=mime_type,
             indexed=True,
