@@ -28,11 +28,7 @@ def is_admin(message: Message) -> bool:
 
 @router.message(CommandStart())
 async def start_handler(message: Message) -> None:
-    await message.answer(
-        "🎬 <b>MOVIES MAGIC CLUB</b>\n\n"
-        "✅ Telegram connection is working.\n"
-        "Phase 1 foundation is online."
-    )
+    await message.answer("🎬 <b>MOVIES MAGIC CLUB</b>\n\n✅ Telegram connection is working.\nPhase 1 foundation is online.")
 
 
 @router.message(Command("repo_test"))
@@ -44,12 +40,7 @@ async def repo_test_handler(message: Message) -> None:
     session: AsyncSession = SessionLocal()
     try:
         result = await run_movie_repository_smoke_test(session)
-        await message.answer(
-            "🧪 <b>Movie Repository Test</b>\n\n"
-            f"Database: ✅\nCreate: {'✅' if result['created'] else '❌'}\n"
-            f"Read: {'✅' if result['read_back'] else '❌'}\n"
-            f"Cleanup: {'✅' if result['cleaned_up'] else '❌'}\n\nNo test data was kept."
-        )
+        await message.answer("🧪 <b>Movie Repository Test</b>\n\nDatabase: ✅\nCreate: " + ("✅" if result["created"] else "❌") + "\nRead: " + ("✅" if result["read_back"] else "❌") + "\nCleanup: " + ("✅" if result["cleaned_up"] else "❌") + "\n\nNo test data was kept.")
     except Exception:
         logger.exception("Movie repository test failed")
         await message.answer("❌ Repository test failed. Check Koyeb logs.")
@@ -66,12 +57,7 @@ async def file_test_handler(message: Message) -> None:
     session: AsyncSession = SessionLocal()
     try:
         result = await run_file_intake_smoke_test(session)
-        await message.answer(
-            "🧪 <b>File Intake Test</b>\n\n"
-            f"Database: ✅\nCreate: {'✅' if result['created'] else '❌'}\n"
-            f"Read: {'✅' if result['read_back'] else '❌'}\n"
-            f"Cleanup: {'✅' if result['cleaned_up'] else '❌'}\n\nNo test data was kept."
-        )
+        await message.answer("🧪 <b>File Intake Test</b>\n\nDatabase: ✅\nCreate: " + ("✅" if result["created"] else "❌") + "\nRead: " + ("✅" if result["read_back"] else "❌") + "\nCleanup: " + ("✅" if result["cleaned_up"] else "❌") + "\n\nNo test data was kept.")
     except Exception:
         logger.exception("File intake test failed")
         await message.answer("❌ File Intake test failed. Check Koyeb logs.")
@@ -81,11 +67,9 @@ async def file_test_handler(message: Message) -> None:
 
 @router.message(Command("parse_test"))
 async def parse_test_handler(message: Message) -> None:
-    """Mobile-friendly admin smoke test for Phase 4 filename parsing."""
     if not is_admin(message):
         await message.answer("⛔ You are not authorized to run this test.")
         return
-
     samples = [
         "Leo.2023.Tamil.1080p.WEB-DL.x264.AAC.mkv",
         "Leo.2008.1080p.BluRay.x264.mkv",
@@ -93,26 +77,13 @@ async def parse_test_handler(message: Message) -> None:
         "Interstellar.2014.English.1080p.BluRay.x264.DTS.mkv",
         "Jailer.2023.Tamil.720p.WEBRip.x265.AAC.mp4",
     ]
-
     passed = 0
     lines = ["🧪 <b>Filename Parser Test</b>", ""]
     for index, filename in enumerate(samples, 1):
         parsed = parse_filename(filename)
-        ok = bool(parsed.title and (parsed.year is not None))
+        ok = bool(parsed.title and parsed.year is not None)
         passed += int(ok)
-        lines.extend([
-            f"<b>{index}. {filename}</b>",
-            f"Title: {parsed.title or 'Unknown'}",
-            f"Year: {parsed.year or 'Unknown'}",
-            f"Language: {parsed.language or 'Unknown'}",
-            f"Quality: {parsed.quality or 'Unknown'}",
-            f"Source: {parsed.source or 'Unknown'}",
-            f"Codec: {parsed.codec or 'Unknown'}",
-            f"Audio: {parsed.audio or 'Unknown'}",
-            f"Extension: {parsed.extension or 'Unknown'}",
-            f"Result: {'✅' if ok else '❌'}",
-            "",
-        ])
+        lines.extend([f"<b>{index}. {filename}</b>", f"Title: {parsed.title or 'Unknown'}", f"Year: {parsed.year or 'Unknown'}", f"Language: {parsed.language or 'Unknown'}", f"Quality: {parsed.quality or 'Unknown'}", f"Source: {parsed.source or 'Unknown'}", f"Codec: {parsed.codec or 'Unknown'}", f"Audio: {parsed.audio or 'Unknown'}", f"Extension: {parsed.extension or 'Unknown'}", f"Result: {'✅' if ok else '❌'}", ""])
     lines.append(f"Parser tests: {passed}/{len(samples)} {'✅' if passed == len(samples) else '⚠️'}")
     lines.append("\nTMDB matching: ⏳ Later")
     lines.append("Movie grouping: ⏳ Later")
@@ -120,7 +91,7 @@ async def parse_test_handler(message: Message) -> None:
 
 
 async def _handle_telegram_file(message: Message) -> None:
-    """Persist raw Telegram file metadata and parse its filename. No TMDB/grouping."""
+    """Persist Telegram file metadata plus parser output. No TMDB/grouping."""
     session: AsyncSession = SessionLocal()
     try:
         if message.document is not None:
@@ -146,6 +117,7 @@ async def _handle_telegram_file(message: Message) -> None:
             filename=filename,
             file_size=file_size,
             mime_type=mime_type,
+            parsed=parsed,
         )
         if created:
             await session.commit()
@@ -156,10 +128,11 @@ async def _handle_telegram_file(message: Message) -> None:
                 f"Year: {parsed.year or 'Unknown'}\n"
                 f"Language: {parsed.language or 'Unknown'}\n"
                 f"Quality: {parsed.quality or 'Unknown'}\n"
-                "Database: ✅\n"
-                "Status: Stored\n"
-                "TMDB matching: ⏳ Later\n"
-                "Movie grouping: ⏳ Later"
+                f"Source: {parsed.source or 'Unknown'}\n"
+                f"Codec: {parsed.codec or 'Unknown'}\n"
+                f"Audio: {parsed.audio or 'Unknown'}\n"
+                f"Extension: {parsed.extension or 'Unknown'}\n\n"
+                "Database: ✅\nStatus: Stored\nTMDB matching: ⏳ Later\nMovie grouping: ⏳ Later"
             )
         else:
             await session.rollback()
