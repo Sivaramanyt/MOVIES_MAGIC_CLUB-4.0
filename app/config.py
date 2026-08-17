@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     webhook_path: str = "/telegram/webhook"
     webhook_secret: str
     database_url: str
+    admin_user_ids: str = ""
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
