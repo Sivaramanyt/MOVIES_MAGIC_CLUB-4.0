@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
+from app.database.movie_grouping import get_movie_group, group_file_count
 from app.database.repositories.movie_file_repository import MovieFileRepository
 from app.database.repositories.movie_repository import MovieRepository
 from app.database.session import SessionLocal
@@ -88,7 +89,7 @@ async def parse_test_handler(message: Message) -> None:
         lines.extend([f"<b>{index}. {filename}</b>", f"Title: {parsed.title or 'Unknown'}", f"Year: {parsed.year or 'Unknown'}", f"Language: {parsed.language or 'Unknown'}", f"Quality: {parsed.quality or 'Unknown'}", f"Source: {parsed.source or 'Unknown'}", f"Codec: {parsed.codec or 'Unknown'}", f"Audio: {parsed.audio or 'Unknown'}", f"Extension: {parsed.extension or 'Unknown'}", f"Result: {'✅' if ok else '❌'}", ""])
     lines.append(f"Parser tests: {passed}/{len(samples)} {'✅' if passed == len(samples) else '⚠️'}")
     lines.append("\nTMDB matching: ⏳ Automatic on incoming files")
-    lines.append("Movie grouping: ⏳ Later")
+    lines.append("Movie grouping: ⏳ TMDB ID based")
     await message.answer("\n".join(lines))
 
 
@@ -166,8 +167,54 @@ async def match_test_handler(message: Message) -> None:
         await message.answer("❌ Match test failed. Check Koyeb logs.")
 
 
+@router.message(Command("group_test"))
+async def group_test_handler(message: Message) -> None:
+    """Mobile-friendly check of the TMDB-backed movie group and linked files."""
+    if not is_admin(message):
+        await message.answer("⛔ You are not authorized to run this test.")
+        return
+
+    argument = (message.text or "").partition(" ")[2].strip()
+    if not argument:
+        await message.answer("🧪 <b>Movie Group Test</b>\n\nUsage:\n<code>/group_test Leo 2023</code>")
+        return
+
+    parts = argument.rsplit(" ", 1)
+    title = argument
+    year = None
+    if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+        title, year = parts[0], int(parts[1])
+
+    session: AsyncSession = SessionLocal()
+    try:
+        movie = await get_movie_group(session, title=title, year=year)
+        if movie is None:
+            await message.answer("⚠️ No saved movie group found. Send a real movie file first.")
+            return
+
+        lines = [
+            "🧪 <b>Movie Group Test</b>",
+            "",
+            f"🎬 {movie.title} ({movie.year or '?'})",
+            f"TMDB ID: <code>{movie.tmdb_id}</code>",
+            f"Files grouped: <b>{group_file_count(movie)}</b>",
+            "",
+        ]
+        for index, file in enumerate(movie.files[:10], 1):
+            lines.append(f"{index}. {file.filename} — {file.quality or '?'} — {file.language or '?'}")
+        if len(movie.files) > 10:
+            lines.append(f"…and {len(movie.files) - 10} more")
+        lines.append("\nGrouping key: TMDB ID ✅")
+        await message.answer("\n".join(lines))
+    except Exception:
+        logger.exception("Movie group test failed")
+        await message.answer("❌ Movie group test failed. Check Koyeb logs.")
+    finally:
+        await session.close()
+
+
 async def _handle_telegram_file(message: Message) -> None:
-    """Persist a Telegram file, then attach it to a high-confidence TMDB movie."""
+    """Persist a Telegram file, match it to TMDB, and attach it to the movie group."""
     session: AsyncSession = SessionLocal()
     try:
         if message.document is not None:
@@ -201,7 +248,6 @@ async def _handle_telegram_file(message: Message) -> None:
             return
 
         match_status = "⚠️ Unmatched"
-        matched_title = None
         if parsed.title:
             try:
                 best, _ = await TMDBClient().match_movie(parsed.title, parsed.year)
@@ -220,11 +266,10 @@ async def _handle_telegram_file(message: Message) -> None:
                     )
                     await file_repository.attach_movie(row, movie)
                     await movie_repository.add_alias(movie, parsed.title)
-                    matched_title = movie.title
-                    match_status = f"✅ Matched: {movie.title} ({movie.year or '?'})"
+                    match_status = f"✅ Matched + grouped: {movie.title} ({movie.year or '?'})"
             except Exception:
                 logger.exception("Automatic TMDB matching failed for file %s", filename)
-                match_status = "⚠️ Stored, TMDB matching failed"
+                match_status = "⚠️ Stored, TMDB matching/grouping failed"
 
         await session.commit()
         await message.answer(
@@ -237,7 +282,7 @@ async def _handle_telegram_file(message: Message) -> None:
             f"Source: {parsed.source or 'Unknown'}\n\n"
             "Database: ✅\n"
             f"TMDB: {match_status}\n"
-            "Movie grouping: ⏳ Later"
+            "Grouping: TMDB ID based ✅"
         )
     except Exception:
         await session.rollback()
