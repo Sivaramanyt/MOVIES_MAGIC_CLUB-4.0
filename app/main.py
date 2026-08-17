@@ -2,11 +2,13 @@ import logging
 from contextlib import asynccontextmanager
 
 from aiogram.types import Update
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import create_bot, create_dispatcher
 from app.config import get_settings
-from app.database.session import check_database_connection, close_database
+from app.database.repository_diagnostics import run_movie_repository_smoke_test
+from app.database.session import SessionLocal, check_database_connection, close_database
 from app.diagnostics import get_database_diagnostics
 
 settings = get_settings()
@@ -61,6 +63,24 @@ async def database_diagnostics(
     except Exception:
         logger.exception("Database diagnostics failed")
         raise HTTPException(status_code=503, detail="Database diagnostics unavailable")
+
+
+@app.post("/admin/diagnostics/repository-smoke-test")
+async def repository_smoke_test(
+    x_admin_diagnostics_token: str | None = Header(default=None),
+) -> dict:
+    """Safely exercise MovieRepository using a transaction that is always rolled back."""
+    if x_admin_diagnostics_token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    session: AsyncSession = SessionLocal()
+    try:
+        return await run_movie_repository_smoke_test(session)
+    except Exception:
+        logger.exception("Movie repository smoke test failed")
+        raise HTTPException(status_code=503, detail="Repository smoke test failed")
+    finally:
+        await session.close()
 
 
 @app.post(settings.webhook_path)
