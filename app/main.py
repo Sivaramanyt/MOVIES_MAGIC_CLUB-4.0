@@ -11,6 +11,7 @@ from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.session import SessionLocal, check_database_connection, close_database
 from app.diagnostics import get_database_diagnostics
+from app.reindex_bot import router as reindex_router
 
 settings = get_settings()
 logging.basicConfig(
@@ -21,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 bot = create_bot(settings.bot_token.get_secret_value())
 dispatcher = create_dispatcher()
+dispatcher.include_router(reindex_router)
 
 
 @asynccontextmanager
