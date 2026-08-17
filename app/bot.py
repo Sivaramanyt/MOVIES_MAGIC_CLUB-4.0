@@ -12,8 +12,10 @@ from app.config import get_settings
 from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.repositories.movie_file_repository import MovieFileRepository
+from app.database.repositories.movie_repository import MovieRepository
 from app.database.session import SessionLocal
 from app.parser.filename_parser import parse_filename
+from app.tmdb import TMDBClient
 
 router = Router()
 settings = get_settings()
@@ -90,8 +92,65 @@ async def parse_test_handler(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+@router.message(Command("tmdb_test"))
+async def tmdb_test_handler(message: Message) -> None:
+    if not is_admin(message):
+        await message.answer("⛔ You are not authorized to run this test.")
+        return
+
+    argument = (message.text or "").partition(" ")[2].strip()
+    if not argument:
+        await message.answer("🧪 <b>TMDB Test</b>\n\nUsage:\n<code>/tmdb_test Leo 2023</code>\n<code>/tmdb_test Interstellar 2014</code>")
+        return
+
+    parts = argument.rsplit(" ", 1)
+    title = argument
+    year = None
+    if len(parts) == 2 and parts[1].isdigit() and len(parts[1]) == 4:
+        title = parts[0]
+        year = int(parts[1])
+
+    await message.answer(f"🔎 Searching TMDB for <b>{title}</b>{f' ({year})' if year else ''}…")
+    try:
+        client = TMDBClient()
+        best, candidates = await client.match_movie(title, year)
+        if not candidates:
+            await message.answer("❌ No TMDB movie candidates found.")
+            return
+
+        lines = ["🎬 <b>TMDB Match Test</b>", ""]
+        if best:
+            lines.extend([
+                "✅ <b>Automatic match:</b>",
+                f"Title: {best.title}",
+                f"Year: {best.year or 'Unknown'}",
+                f"TMDB ID: <code>{best.tmdb_id}</code>",
+                f"Score: {best.score:.2f}",
+                "",
+            ])
+        else:
+            lines.extend(["⚠️ <b>No automatic match</b>", "The result is ambiguous or confidence is too low.", ""])
+
+        lines.append("<b>Top candidates:</b>")
+        for index, candidate in enumerate(candidates[:3], 1):
+            lines.append(f"{index}. {candidate.title} ({candidate.year or '?'}) — {candidate.score:.2f} — ID {candidate.tmdb_id}")
+        lines.append("\nDatabase write: ⏳ Not performed")
+        lines.append("Movie grouping: ⏳ Not performed")
+        await message.answer("\n".join(lines))
+    except Exception as exc:
+        logger.exception("TMDB test failed")
+        safe_message = str(exc)
+        if "api key" in safe_message.lower():
+            safe_message = "TMDB API key is missing or invalid in Koyeb environment variables."
+        elif "rate limit" in safe_message.lower():
+            safe_message = "TMDB rate limit reached. Please try again later."
+        else:
+            safe_message = "TMDB request failed. Check Koyeb logs."
+        await message.answer(f"❌ <b>TMDB test failed</b>\n\n{safe_message}")
+
+
 async def _handle_telegram_file(message: Message) -> None:
-    """Persist Telegram file metadata plus parser output. No TMDB/grouping."""
+    """Persist Telegram file metadata plus parser output. TMDB/grouping is not automatic yet."""
     session: AsyncSession = SessionLocal()
     try:
         if message.document is not None:
