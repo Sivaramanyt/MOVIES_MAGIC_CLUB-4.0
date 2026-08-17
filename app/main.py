@@ -2,11 +2,12 @@ import logging
 from contextlib import asynccontextmanager
 
 from aiogram.types import Update
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import create_bot, create_dispatcher
 from app.config import get_settings
+from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.session import SessionLocal, check_database_connection, close_database
 from app.diagnostics import get_database_diagnostics
@@ -54,10 +55,8 @@ async def health() -> dict[str, str]:
 async def database_diagnostics(
     x_admin_diagnostics_token: str | None = Header(default=None),
 ) -> dict:
-    """Return schema diagnostics only when the admin diagnostic token matches."""
     if x_admin_diagnostics_token != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
-
     try:
         return await get_database_diagnostics()
     except Exception:
@@ -69,16 +68,30 @@ async def database_diagnostics(
 async def repository_smoke_test(
     x_admin_diagnostics_token: str | None = Header(default=None),
 ) -> dict:
-    """Safely exercise MovieRepository using a transaction that is always rolled back."""
     if x_admin_diagnostics_token != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="Forbidden")
-
     session: AsyncSession = SessionLocal()
     try:
         return await run_movie_repository_smoke_test(session)
     except Exception:
         logger.exception("Movie repository smoke test failed")
         raise HTTPException(status_code=503, detail="Repository smoke test failed")
+    finally:
+        await session.close()
+
+
+@app.post("/admin/diagnostics/file-intake-smoke-test")
+async def file_intake_smoke_test(
+    x_admin_diagnostics_token: str | None = Header(default=None),
+) -> dict:
+    if x_admin_diagnostics_token != settings.webhook_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    session: AsyncSession = SessionLocal()
+    try:
+        return await run_file_intake_smoke_test(session)
+    except Exception:
+        logger.exception("File intake smoke test failed")
+        raise HTTPException(status_code=503, detail="File intake smoke test failed")
     finally:
         await session.close()
 
@@ -91,7 +104,12 @@ async def telegram_webhook(
     if x_telegram_bot_api_secret_token != settings.webhook_secret:
         raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
-    payload = await request.json()
-    update = Update.model_validate(payload)
-    await dispatcher.feed_update(bot, update)
+    try:
+        payload = await request.json()
+        update = Update.model_validate(payload)
+        await dispatcher.feed_update(bot, update)
+    except Exception:
+        logger.exception("Telegram update processing failed")
+        return {"status": "accepted", "processing": "failed"}
+
     return {"status": "ok"}
