@@ -1,11 +1,12 @@
 import logging
 from contextlib import asynccontextmanager
 
+from aiogram import Dispatcher
 from aiogram.types import Update
 from fastapi import FastAPI, Header, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot import create_bot, create_dispatcher
+from app.bot import create_bot, router as bot_router
 from app.config import get_settings
 from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
@@ -21,8 +22,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 bot = create_bot(settings.bot_token.get_secret_value())
-dispatcher = create_dispatcher()
+
+# Router order matters in aiogram.  The normal bot router has a catch-all
+# message handler, so the admin command router must be registered first.
+dispatcher = Dispatcher()
 dispatcher.include_router(reindex_router)
+dispatcher.include_router(bot_router)
 
 
 @asynccontextmanager
