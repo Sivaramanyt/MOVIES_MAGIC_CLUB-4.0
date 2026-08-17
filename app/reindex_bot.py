@@ -81,11 +81,15 @@ async def reindex_handler(message: Message) -> None:
                     "Database: ✅\n"
                     "Duplicates: prevented by channel + message ID"
                 )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Channel reindex failed")
+                safe_reason = str(exc).strip() or exc.__class__.__name__
+                # Keep secrets out of Telegram. Only send the sanitized exception
+                # text produced by the history service (no token/URL values).
                 await message.answer(
                     "❌ <b>Channel reindex failed.</b>\n\n"
-                    "Check Koyeb logs. Existing database records were not deleted."
+                    f"Reason: <code>{safe_reason[:300]}</code>\n\n"
+                    "Existing database records were not deleted."
                 )
 
     asyncio.create_task(run())
