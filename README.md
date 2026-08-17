@@ -27,3 +27,4 @@ The project is intentionally being built in stages. Telegram update delivery and
 6. Add structured logging and error handling.
 
 Movie indexing and TMDB functionality will be added only after the Telegram foundation is proven healthy.
+
