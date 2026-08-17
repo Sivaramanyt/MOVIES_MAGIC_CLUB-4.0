@@ -8,7 +8,9 @@ from app.database.repositories.movie_repository import MovieRepository
 async def run_movie_repository_smoke_test(session: AsyncSession) -> dict:
     """Create, read, and clean up one isolated temporary movie in a transaction."""
     marker = uuid.uuid4().hex
-    tmdb_id = 2_000_000_000 + int(marker[:8], 16)
+    # Movie.tmdb_id is a PostgreSQL INTEGER, so keep the diagnostic value
+    # safely below the signed 32-bit maximum.
+    tmdb_id = 1_000_000_000 + int(marker[:7], 16)
     title = f"__MMC_REPOSITORY_TEST__{marker}"
 
     repository = MovieRepository(session)
