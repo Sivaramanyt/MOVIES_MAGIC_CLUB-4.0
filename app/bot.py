@@ -87,7 +87,7 @@ async def parse_test_handler(message: Message) -> None:
         passed += int(ok)
         lines.extend([f"<b>{index}. {filename}</b>", f"Title: {parsed.title or 'Unknown'}", f"Year: {parsed.year or 'Unknown'}", f"Language: {parsed.language or 'Unknown'}", f"Quality: {parsed.quality or 'Unknown'}", f"Source: {parsed.source or 'Unknown'}", f"Codec: {parsed.codec or 'Unknown'}", f"Audio: {parsed.audio or 'Unknown'}", f"Extension: {parsed.extension or 'Unknown'}", f"Result: {'✅' if ok else '❌'}", ""])
     lines.append(f"Parser tests: {passed}/{len(samples)} {'✅' if passed == len(samples) else '⚠️'}")
-    lines.append("\nTMDB matching: ⏳ Later")
+    lines.append("\nTMDB matching: ⏳ Automatic on incoming files")
     lines.append("Movie grouping: ⏳ Later")
     await message.answer("\n".join(lines))
 
@@ -120,14 +120,7 @@ async def tmdb_test_handler(message: Message) -> None:
 
         lines = ["🎬 <b>TMDB Match Test</b>", ""]
         if best:
-            lines.extend([
-                "✅ <b>Automatic match:</b>",
-                f"Title: {best.title}",
-                f"Year: {best.year or 'Unknown'}",
-                f"TMDB ID: <code>{best.tmdb_id}</code>",
-                f"Score: {best.score:.2f}",
-                "",
-            ])
+            lines.extend(["✅ <b>Automatic match:</b>", f"Title: {best.title}", f"Year: {best.year or 'Unknown'}", f"TMDB ID: <code>{best.tmdb_id}</code>", f"Score: {best.score:.2f}", ""])
         else:
             lines.extend(["⚠️ <b>No automatic match</b>", "The result is ambiguous or confidence is too low.", ""])
 
@@ -137,20 +130,44 @@ async def tmdb_test_handler(message: Message) -> None:
         lines.append("\nDatabase write: ⏳ Not performed")
         lines.append("Movie grouping: ⏳ Not performed")
         await message.answer("\n".join(lines))
-    except Exception as exc:
+    except Exception:
         logger.exception("TMDB test failed")
-        safe_message = str(exc)
-        if "api key" in safe_message.lower():
-            safe_message = "TMDB API key is missing or invalid in Koyeb environment variables."
-        elif "rate limit" in safe_message.lower():
-            safe_message = "TMDB rate limit reached. Please try again later."
+        await message.answer("❌ <b>TMDB test failed</b>\n\nCheck Koyeb logs.")
+
+
+@router.message(Command("match_test"))
+async def match_test_handler(message: Message) -> None:
+    """Mobile-friendly end-to-end parser + TMDB match test without database writes."""
+    if not is_admin(message):
+        await message.answer("⛔ You are not authorized to run this test.")
+        return
+    filename = (message.text or "").partition(" ")[2].strip()
+    if not filename:
+        await message.answer("🧪 <b>Match Test</b>\n\nUsage:\n<code>/match_test Leo.2023.Tamil.1080p.WEB-DL.mkv</code>")
+        return
+    parsed = parse_filename(filename)
+    if not parsed.title:
+        await message.answer("⚠️ Could not extract a movie title from this filename.")
+        return
+    await message.answer(f"🔎 Matching <b>{parsed.title}</b>{f' ({parsed.year})' if parsed.year else ''} with TMDB…")
+    try:
+        best, candidates = await TMDBClient().match_movie(parsed.title, parsed.year)
+        lines = ["🧪 <b>Match Test</b>", "", f"Parsed title: {parsed.title}", f"Parsed year: {parsed.year or 'Unknown'}", ""]
+        if best:
+            lines.extend(["✅ <b>HIGH-CONFIDENCE MATCH</b>", f"TMDB: {best.title} ({best.year or '?'})", f"TMDB ID: <code>{best.tmdb_id}</code>", f"Score: {best.score:.2f}", "Database write: ⏳ Test only"])
+        elif candidates:
+            top = candidates[0]
+            lines.extend(["⚠️ <b>NO AUTOMATIC MATCH</b>", f"Best candidate: {top.title} ({top.year or '?'})", f"Score: {top.score:.2f}", "Reason: confidence/margin below automatic threshold.", "Database write: ⏳ Test only"])
         else:
-            safe_message = "TMDB request failed. Check Koyeb logs."
-        await message.answer(f"❌ <b>TMDB test failed</b>\n\n{safe_message}")
+            lines.append("❌ No TMDB candidates found.")
+        await message.answer("\n".join(lines))
+    except Exception:
+        logger.exception("Match test failed")
+        await message.answer("❌ Match test failed. Check Koyeb logs.")
 
 
 async def _handle_telegram_file(message: Message) -> None:
-    """Persist Telegram file metadata plus parser output. TMDB/grouping is not automatic yet."""
+    """Persist a Telegram file, then attach it to a high-confidence TMDB movie."""
     session: AsyncSession = SessionLocal()
     try:
         if message.document is not None:
@@ -167,8 +184,8 @@ async def _handle_telegram_file(message: Message) -> None:
             return
 
         parsed = parse_filename(filename)
-        repository = MovieFileRepository(session)
-        row, created = await repository.create_or_get(
+        file_repository = MovieFileRepository(session)
+        row, created = await file_repository.create_or_get(
             channel_id=message.chat.id,
             message_id=message.message_id,
             telegram_file_id=file_id,
@@ -178,24 +195,50 @@ async def _handle_telegram_file(message: Message) -> None:
             mime_type=mime_type,
             parsed=parsed,
         )
-        if created:
-            await session.commit()
-            await message.answer(
-                "📥 <b>File received</b>\n\n"
-                f"Name: <code>{filename}</code>\n"
-                f"Title: {parsed.title or 'Unknown'}\n"
-                f"Year: {parsed.year or 'Unknown'}\n"
-                f"Language: {parsed.language or 'Unknown'}\n"
-                f"Quality: {parsed.quality or 'Unknown'}\n"
-                f"Source: {parsed.source or 'Unknown'}\n"
-                f"Codec: {parsed.codec or 'Unknown'}\n"
-                f"Audio: {parsed.audio or 'Unknown'}\n"
-                f"Extension: {parsed.extension or 'Unknown'}\n\n"
-                "Database: ✅\nStatus: Stored\nTMDB matching: ⏳ Later\nMovie grouping: ⏳ Later"
-            )
-        else:
+        if not created:
             await session.rollback()
             await message.answer("📥 File already indexed. No duplicate record created.")
+            return
+
+        match_status = "⚠️ Unmatched"
+        matched_title = None
+        if parsed.title:
+            try:
+                best, _ = await TMDBClient().match_movie(parsed.title, parsed.year)
+                if best:
+                    movie_repository = MovieRepository(session)
+                    movie, _ = await movie_repository.get_or_create_by_tmdb(
+                        tmdb_id=best.tmdb_id,
+                        title=best.title,
+                        original_title=best.original_title,
+                        release_date=best.release_date,
+                        year=best.year,
+                        overview=best.overview,
+                        poster_url=best.poster_url,
+                        backdrop_url=best.backdrop_url,
+                        rating=best.rating,
+                    )
+                    await file_repository.attach_movie(row, movie)
+                    await movie_repository.add_alias(movie, parsed.title)
+                    matched_title = movie.title
+                    match_status = f"✅ Matched: {movie.title} ({movie.year or '?'})"
+            except Exception:
+                logger.exception("Automatic TMDB matching failed for file %s", filename)
+                match_status = "⚠️ Stored, TMDB matching failed"
+
+        await session.commit()
+        await message.answer(
+            "📥 <b>File indexed</b>\n\n"
+            f"Name: <code>{filename}</code>\n"
+            f"Title: {parsed.title or 'Unknown'}\n"
+            f"Year: {parsed.year or 'Unknown'}\n"
+            f"Language: {parsed.language or 'Unknown'}\n"
+            f"Quality: {parsed.quality or 'Unknown'}\n"
+            f"Source: {parsed.source or 'Unknown'}\n\n"
+            "Database: ✅\n"
+            f"TMDB: {match_status}\n"
+            "Movie grouping: ⏳ Later"
+        )
     except Exception:
         await session.rollback()
         logger.exception("Telegram file intake failed")
