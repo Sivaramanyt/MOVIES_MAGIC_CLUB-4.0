@@ -1,3 +1,5 @@
+import os
+
 from aiogram import Bot, Dispatcher, Router
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -14,10 +16,11 @@ settings = get_settings()
 
 
 def is_admin(message: Message) -> bool:
-    """Allow only the configured Telegram admin user to run diagnostics."""
+    """Allow only configured Telegram admin user IDs to run diagnostics."""
+    configured_ids = getattr(settings, "admin_user_ids", "") or os.getenv("ADMIN_USER_IDS", "")
     admin_ids = {
         int(value.strip())
-        for value in settings.admin_user_ids.split(",")
+        for value in configured_ids.split(",")
         if value.strip().isdigit()
     }
     return message.from_user is not None and message.from_user.id in admin_ids
