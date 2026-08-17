@@ -1,12 +1,12 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import MovieFile
+from app.database.models import Movie, MovieFile
 from app.parser.filename_parser import ParsedFilename
 
 
 class MovieFileRepository:
-    """Persistence for Telegram files and parsed metadata before movie grouping."""
+    """Persistence for Telegram files and parsed metadata before/after TMDB matching."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -58,3 +58,8 @@ class MovieFileRepository:
         self.session.add(row)
         await self.session.flush()
         return row, True
+
+    async def attach_movie(self, row: MovieFile, movie: Movie) -> MovieFile:
+        row.movie_id = movie.id
+        await self.session.flush()
+        return row
