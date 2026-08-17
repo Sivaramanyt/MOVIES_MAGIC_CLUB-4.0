@@ -13,14 +13,28 @@ settings = get_settings()
 
 
 def _normalize_database_url(url: str) -> str:
-    """Normalize common PostgreSQL URLs for SQLAlchemy's asyncpg driver."""
+    """Normalize provider PostgreSQL URLs for SQLAlchemy's asyncpg driver."""
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://") :]
 
-    if url.startswith("postgresql://"):
-        url = "postgresql+asyncpg://" + url[len("postgresql://") :]
+    parts = urlsplit(url)
+    if parts.scheme == "postgresql":
+        parts = parts._replace(scheme="postgresql+asyncpg")
 
-    return url
+    # Neon connection strings may contain channel_binding=require.
+    # asyncpg does not recognize this as a connection option, so it can
+    # otherwise be forwarded as a PostgreSQL server setting and fail.
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() != "channel_binding"
+    ]
+
+    # Neon requires TLS. Preserve an existing sslmode or add the required one.
+    if not any(key.lower() == "sslmode" for key, _ in query):
+        query.append(("sslmode", "require"))
+
+    return urlunsplit(parts._replace(query=urlencode(query)))
 
 
 engine = create_async_engine(
