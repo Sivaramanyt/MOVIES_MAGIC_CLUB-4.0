@@ -1,3 +1,4 @@
+import re
 from collections.abc import Sequence
 
 from sqlalchemy import or_, select
@@ -7,13 +8,16 @@ from sqlalchemy.orm import selectinload
 from app.database.models import Movie, MovieAlias
 
 
-class MovieRepository:
-    """Database access for movie groups and their aliases.
+def normalize_movie_title(title: str) -> str:
+    """Create a conservative database search/grouping key from a parsed title."""
+    value = (title or "").casefold().strip()
+    value = re.sub(r"[._\-]+", " ", value)
+    value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", value).strip()
 
-    This layer deliberately contains no Telegram or TMDB logic. It only reads and
-    writes movie-domain records, keeping the grouping engine independent from
-    transport and external APIs.
-    """
+
+class MovieRepository:
+    """Database access for TMDB-backed and database-first movie groups."""
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -34,21 +38,59 @@ class MovieRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_local_group(self, title: str, year: int | None = None) -> Movie | None:
+        normalized = normalize_movie_title(title)
+        if not normalized:
+            return None
+        query = select(Movie).where(
+            Movie.tmdb_id.is_(None),
+            Movie.normalized_title == normalized,
+        )
+        if year is None:
+            query = query.where(Movie.year.is_(None))
+        else:
+            query = query.where(Movie.year == year)
+        result = await self.session.execute(query.limit(1))
+        return result.scalar_one_or_none()
+
+    async def get_or_create_local_group(self, title: str, year: int | None = None) -> tuple[Movie, bool]:
+        normalized = normalize_movie_title(title)
+        if not normalized:
+            raise ValueError("A non-empty title is required for a local movie group")
+
+        existing = await self.get_local_group(title, year)
+        if existing is not None:
+            return existing, False
+
+        year_key = str(year) if year is not None else "unknown"
+        movie = Movie(
+            tmdb_id=None,
+            title=title.strip(),
+            original_title=title.strip(),
+            normalized_title=normalized,
+            group_key=f"local:{normalized}:{year_key}",
+            year=year,
+        )
+        self.session.add(movie)
+        await self.session.flush()
+        return movie, True
+
     async def find_by_title(self, title: str) -> Sequence[Movie]:
-        normalized = title.strip()
+        normalized = normalize_movie_title(title)
         if not normalized:
             return []
 
         pattern = f"%{normalized}%"
         result = await self.session.execute(
             select(Movie)
-            .options(selectinload(Movie.aliases))
+            .options(selectinload(Movie.aliases), selectinload(Movie.files))
             .where(
                 or_(
-                    Movie.title.ilike(pattern),
-                    Movie.original_title.ilike(pattern),
+                    Movie.normalized_title.ilike(pattern),
+                    Movie.title.ilike(f"%{title.strip()}%"),
+                    Movie.original_title.ilike(f"%{title.strip()}%"),
                     Movie.id.in_(
-                        select(MovieAlias.movie_id).where(MovieAlias.alias.ilike(pattern))
+                        select(MovieAlias.movie_id).where(MovieAlias.alias.ilike(f"%{title.strip()}%"))
                     ),
                 )
             )
@@ -59,9 +101,11 @@ class MovieRepository:
     async def create(
         self,
         *,
-        tmdb_id: int,
+        tmdb_id: int | None,
         title: str,
         original_title: str | None = None,
+        normalized_title: str | None = None,
+        group_key: str | None = None,
         release_date: str | None = None,
         year: int | None = None,
         overview: str | None = None,
@@ -73,6 +117,8 @@ class MovieRepository:
             tmdb_id=tmdb_id,
             title=title,
             original_title=original_title,
+            normalized_title=normalized_title or normalize_movie_title(title),
+            group_key=group_key or (f"tmdb:{tmdb_id}" if tmdb_id is not None else None),
             release_date=release_date,
             year=year,
             overview=overview,
@@ -101,10 +147,30 @@ class MovieRepository:
         if movie is not None:
             return movie, False
 
+        # Promote an exact database-first group instead of creating a duplicate
+        # group when TMDB eventually identifies it.
+        local = await self.get_local_group(title, year)
+        if local is not None:
+            local.tmdb_id = tmdb_id
+            local.title = title
+            local.original_title = original_title
+            local.normalized_title = normalize_movie_title(title)
+            local.group_key = f"tmdb:{tmdb_id}"
+            local.release_date = release_date
+            local.year = year
+            local.overview = overview
+            local.poster_url = poster_url
+            local.backdrop_url = backdrop_url
+            local.rating = rating
+            await self.session.flush()
+            return local, False
+
         movie = await self.create(
             tmdb_id=tmdb_id,
             title=title,
             original_title=original_title,
+            normalized_title=normalize_movie_title(title),
+            group_key=f"tmdb:{tmdb_id}",
             release_date=release_date,
             year=year,
             overview=overview,
