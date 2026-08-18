@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 
@@ -24,6 +25,7 @@ router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
 UNMATCHED_PAGE_SIZE = 10
+REMATCH_RUNNING = False
 
 
 def is_admin(message: Message) -> bool:
@@ -93,6 +95,149 @@ async def _unmatched_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup | No
         return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
     finally:
         await session.close()
+
+
+async def _tmdb_match_with_retries(title: str, year: int | None, attempts: int = 3):
+    """Retry transient TMDB failures without changing the match confidence rules."""
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await TMDBClient().match_movie(title, year)
+        except Exception as exc:
+            last_error = exc
+            logger.warning(
+                "TMDB rematch attempt %s/%s failed for %s (%s)",
+                attempt,
+                attempts,
+                title,
+                exc,
+            )
+            if attempt < attempts:
+                await asyncio.sleep(2 * attempt)
+    assert last_error is not None
+    raise last_error
+
+
+@router.message(Command("rematch"))
+async def rematch_handler(message: Message) -> None:
+    """Safely reparse and retry TMDB matching for currently-unmatched records only."""
+    global REMATCH_RUNNING
+
+    if not is_admin(message):
+        await message.answer("⛔ You are not authorized to run rematch.")
+        return
+    if REMATCH_RUNNING:
+        await message.answer("⏳ A rematch operation is already running. Please wait.")
+        return
+
+    argument = (message.text or "").partition(" ")[2].strip()
+    limit = 100
+    if argument:
+        if not argument.isdigit() or int(argument) <= 0:
+            await message.answer("Usage: <code>/rematch 100</code>\n\nChoose a positive batch size.")
+            return
+        limit = min(int(argument), 500)
+
+    REMATCH_RUNNING = True
+    await message.answer(
+        "🔄 <b>Unmatched rematch started</b>\n\n"
+        f"Batch size: <b>{limit}</b>\n"
+        "Matched records will be left untouched.\n"
+        "Existing channel + message identity is unchanged.\n\n"
+        "⏳ Re-parsing with the latest prefix rules…"
+    )
+
+    session: AsyncSession = SessionLocal()
+    processed = reparsed = matched = unmatched = failed = 0
+    try:
+        rows = (
+            await session.scalars(
+                select(MovieFile)
+                .where(MovieFile.movie_id.is_(None))
+                .order_by(MovieFile.id.asc())
+                .limit(limit)
+            )
+        ).all()
+
+        if not rows:
+            await message.answer("🔄 <b>Rematch complete</b>\n\n✅ No unmatched records remain.")
+            return
+
+        file_repository = MovieFileRepository(session)
+        movie_repository = MovieRepository(session)
+
+        for row in rows:
+            processed += 1
+            try:
+                # Re-read the current linkage defensively. Already-matched rows are
+                # never modified even if another worker matched them meanwhile.
+                if row.movie_id is not None:
+                    continue
+
+                parsed = parse_filename(row.filename)
+
+                # Persist parser metadata independently first. If TMDB is down,
+                # the corrected parser result is still retained for the next run.
+                await session.begin_nested()
+                await file_repository.update_parsed_metadata(row, parsed)
+                await session.commit()
+                reparsed += 1
+
+                if not parsed.title:
+                    unmatched += 1
+                    continue
+
+                try:
+                    best, _ = await _tmdb_match_with_retries(parsed.title, parsed.year)
+                except Exception:
+                    failed += 1
+                    logger.exception("TMDB rematch failed for movie file %s", row.id)
+                    continue
+
+                if best is None:
+                    unmatched += 1
+                    continue
+
+                # The existing TMDB ID based grouping path is reused. No new
+                # identity key or duplicate file record is created.
+                movie, _ = await movie_repository.get_or_create_by_tmdb(
+                    tmdb_id=best.tmdb_id,
+                    title=best.title,
+                    original_title=best.original_title,
+                    release_date=best.release_date,
+                    year=best.year,
+                    overview=best.overview,
+                    poster_url=best.poster_url,
+                    backdrop_url=best.backdrop_url,
+                    rating=best.rating,
+                )
+                await file_repository.attach_movie(row, movie)
+                await movie_repository.add_alias(movie, parsed.title)
+                await session.commit()
+                matched += 1
+            except Exception:
+                await session.rollback()
+                failed += 1
+                logger.exception("Unmatched rematch failed for movie file %s", getattr(row, "id", "?"))
+
+        await message.answer(
+            "🔄 <b>Unmatched Rematch Complete</b>\n\n"
+            f"Processed: <b>{processed}</b>\n"
+            f"Re-parsed: <b>{reparsed}</b>\n"
+            f"TMDB matched + grouped: <b>{matched}</b>\n"
+            f"Still unmatched: <b>{unmatched}</b>\n"
+            f"Failed: <b>{failed}</b>\n\n"
+            "✅ Matched records were not reprocessed.\n"
+            "✅ No duplicate file records were created.\n"
+            "✅ Parser metadata is safe to retry."
+        )
+    except Exception:
+        await session.rollback()
+        logger.exception("Unmatched rematch operation failed")
+        await message.answer("❌ Rematch failed. Existing database records were not deleted. Check Koyeb logs.")
+    finally:
+        await session.close()
+        REMATCH_RUNNING = False
 
 
 @router.message(CommandStart())
