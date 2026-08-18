@@ -12,6 +12,7 @@ from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.session import SessionLocal, check_database_connection, close_database
 from app.diagnostics import get_database_diagnostics
+from app.local_search_bot import router as local_search_router
 from app.reindex_bot import router as reindex_router
 
 settings = get_settings()
@@ -23,10 +24,11 @@ logger = logging.getLogger(__name__)
 
 bot = create_bot(settings.bot_token.get_secret_value())
 
-# Router order matters in aiogram.  The normal bot router has a catch-all
-# message handler, so the admin command router must be registered first.
+# Router order matters in aiogram. Admin/index/local-search routers must be
+# registered before the normal bot router because it has a catch-all handler.
 dispatcher = Dispatcher()
 dispatcher.include_router(reindex_router)
+dispatcher.include_router(local_search_router)
 dispatcher.include_router(bot_router)
 
 
