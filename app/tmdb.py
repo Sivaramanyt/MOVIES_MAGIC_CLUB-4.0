@@ -52,7 +52,12 @@ class TMDBClient:
     def __init__(self) -> None:
         self.api_key = get_settings().tmdb_api_key.get_secret_value()
 
-    async def search_movies(self, title: str, year: int | None = None, language: str | None = None) -> list[TMDBCandidate]:
+    async def search_movies(
+        self,
+        title: str,
+        year: int | None = None,
+        language: str | None = None,
+    ) -> list[TMDBCandidate]:
         if not title.strip():
             return []
 
@@ -67,14 +72,21 @@ class TMDBClient:
 
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(f"{TMDB_API_BASE}/search/movie", params=params) as response:
+            async with session.get(
+                f"{TMDB_API_BASE}/search/movie",
+                params=params,
+            ) as response:
                 if response.status == 401:
                     raise RuntimeError("TMDB API key is invalid")
                 if response.status == 429:
                     raise RuntimeError("TMDB rate limit reached; try again shortly")
                 if response.status >= 400:
                     body = await response.text()
-                    logger.warning("TMDB search failed: HTTP %s: %s", response.status, body[:300])
+                    logger.warning(
+                        "TMDB search failed: HTTP %s: %s",
+                        response.status,
+                        body[:300],
+                    )
                     raise RuntimeError(f"TMDB API returned HTTP {response.status}")
                 data = await response.json()
 
@@ -92,7 +104,15 @@ class TMDBClient:
             year_score = 0.0
             if year and result_year:
                 diff = abs(year - result_year)
-                year_score = 1.0 if diff == 0 else 0.65 if diff == 1 else 0.25 if diff <= 2 else 0.0
+                year_score = (
+                    1.0
+                    if diff == 0
+                    else 0.65
+                    if diff == 1
+                    else 0.25
+                    if diff <= 2
+                    else 0.0
+                )
             elif not year:
                 year_score = 0.5
 
@@ -105,10 +125,26 @@ class TMDBClient:
                     release_date=release_date,
                     year=result_year,
                     overview=item.get("overview"),
-                    poster_url=f"{IMAGE_BASE}{item['poster_path']}" if item.get("poster_path") else None,
-                    backdrop_url=f"{IMAGE_BASE}{item['backdrop_path']}" if item.get("backdrop_path") else None,
-                    rating=float(item["vote_average"]) if item.get("vote_average") is not None else None,
-                    popularity=float(item["popularity"]) if item.get("popularity") is not None else None,
+                    poster_url=(
+                        f"{IMAGE_BASE}{item['poster_path']}"
+                        if item.get("poster_path")
+                        else None
+                    ),
+                    backdrop_url=(
+                        f"{IMAGE_BASE}{item['backdrop_path']}"
+                        if item.get("backdrop_path")
+                        else None
+                    ),
+                    rating=(
+                        float(item["vote_average"])
+                        if item.get("vote_average") is not None
+                        else None
+                    ),
+                    popularity=(
+                        float(item["popularity"])
+                        if item.get("popularity") is not None
+                        else None
+                    ),
                     score=score,
                 )
             )
@@ -116,13 +152,44 @@ class TMDBClient:
         candidates.sort(key=lambda item: item.score, reverse=True)
         return candidates[:5]
 
-    async def match_movie(self, title: str, year: int | None = None, language: str | None = None) -> tuple[TMDBCandidate | None, list[TMDBCandidate]]:
+    async def match_movie(
+        self,
+        title: str,
+        year: int | None = None,
+        language: str | None = None,
+    ) -> tuple[TMDBCandidate | None, list[TMDBCandidate]]:
+        """Find a high-confidence movie, with a safe fallback search without year.
+
+        Historical release filenames are often inconsistent about the year. The
+        first search uses the parsed year; if it cannot produce a high-confidence
+        match, a second title-only search is attempted. We still require a strong
+        title score/margin, so this does not blindly attach the first TMDB result.
+        """
         candidates = await self.search_movies(title, year, language)
-        if not candidates:
-            return None, []
-        best = candidates[0]
+
+        best = candidates[0] if candidates else None
         second_score = candidates[1].score if len(candidates) > 1 else 0.0
-        # Automatic matching requires both a strong title/year score and a useful margin.
-        if best.score >= 0.86 and (best.score - second_score >= 0.06 or best.score >= 0.94):
+
+        if best and best.score >= 0.84 and (
+            best.score - second_score >= 0.06 or best.score >= 0.93
+        ):
             return best, candidates
+
+        # Fallback for files whose year is missing, wrong, or formatted in a way
+        # that prevents TMDB's year filter from returning the right movie.
+        if year is not None:
+            fallback = await self.search_movies(title, None, language)
+            if fallback:
+                fallback_best = fallback[0]
+                fallback_second = fallback[1].score if len(fallback) > 1 else 0.0
+                if fallback_best.score >= 0.84 and (
+                    fallback_best.score - fallback_second >= 0.06
+                    or fallback_best.score >= 0.93
+                ):
+                    return fallback_best, fallback
+
+                # Keep the stronger candidate set for diagnostics/retry callers.
+                if fallback_best.score > (best.score if best else 0.0):
+                    candidates = fallback
+
         return None, candidates
