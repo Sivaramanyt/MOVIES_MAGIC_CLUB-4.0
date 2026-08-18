@@ -11,6 +11,11 @@ class IndexProgress:
     limit: int = 0
     scanned: int = 0
     files: int = 0
+    documents: int = 0
+    videos: int = 0
+    photos: int = 0
+    other_media: int = 0
+    text_service: int = 0
     created: int = 0
     existing: int = 0
     matched: int = 0
