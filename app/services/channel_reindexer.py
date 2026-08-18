@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 
@@ -6,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.repositories.movie_file_repository import MovieFileRepository
 from app.database.repositories.movie_repository import MovieRepository
 from app.parser.filename_parser import parse_filename
+from app.services.index_control import index_controller
 from app.tmdb import TMDBClient
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,18 @@ class ReindexResult:
     failed: int = 0
 
 
+async def _tmdb_match_with_retry(title: str, year: int | None):
+    last_error = None
+    for attempt in range(3):
+        try:
+            return await TMDBClient().match_movie(title, year)
+        except Exception as exc:
+            last_error = exc
+            if attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+    raise last_error
+
+
 async def index_telegram_file(
     session: AsyncSession,
     *,
@@ -33,7 +47,7 @@ async def index_telegram_file(
     file_size: int | None,
     mime_type: str | None,
 ) -> tuple[str, bool]:
-    """Persist one historical Telegram file and attach it to a TMDB movie when confident."""
+    """Idempotently persist one historical file and retry TMDB before giving up."""
     parsed = parse_filename(filename)
     file_repository = MovieFileRepository(session)
     row, created = await file_repository.create_or_get(
@@ -48,15 +62,18 @@ async def index_telegram_file(
     )
 
     if not created:
-        return "existing", False
+        # Existing rows are intentionally never duplicated. If already grouped,
+        # leave them untouched; otherwise this pass can safely retry TMDB work.
+        if row.movie_id is not None:
+            return "existing", False
 
     if not parsed.title:
-        return "unmatched", True
+        return "unmatched", created
 
     try:
-        best, _ = await TMDBClient().match_movie(parsed.title, parsed.year)
+        best, _ = await _tmdb_match_with_retry(parsed.title, parsed.year)
         if not best:
-            return "unmatched", True
+            return "unmatched", created
 
         movie_repository = MovieRepository(session)
         movie, _ = await movie_repository.get_or_create_by_tmdb(
@@ -72,16 +89,20 @@ async def index_telegram_file(
         )
         await file_repository.attach_movie(row, movie)
         await movie_repository.add_alias(movie, parsed.title)
-        return "matched", True
+        return "matched", created
     except Exception:
         logger.exception("TMDB matching failed for historical file %s", filename)
-        return "unmatched", True
+        return "unmatched", created
 
 
 async def reindex_messages(session: AsyncSession, messages) -> ReindexResult:
     result = ReindexResult()
-    for message in messages:
+    async for message in messages:
+        if await index_controller.wait_if_paused():
+            break
+
         result.scanned += 1
+        index_controller.progress.scanned = result.scanned
         document = getattr(message, "document", None)
         video = getattr(message, "video", None)
         media = document or video
@@ -89,6 +110,7 @@ async def reindex_messages(session: AsyncSession, messages) -> ReindexResult:
             continue
 
         result.files += 1
+        index_controller.progress.files = result.files
         try:
             telegram_file_id = f"mtproto:{media.id}:{getattr(media, 'access_hash', '')}"
             unique_id = str(media.id) if getattr(media, "id", None) is not None else None
@@ -118,6 +140,12 @@ async def reindex_messages(session: AsyncSession, messages) -> ReindexResult:
         except Exception:
             await session.rollback()
             result.failed += 1
+            index_controller.progress.failed = result.failed
             logger.exception("Historical file indexing failed for message %s", getattr(message, "id", "?"))
+
+        index_controller.progress.created = result.created
+        index_controller.progress.existing = result.existing
+        index_controller.progress.matched = result.matched
+        index_controller.progress.unmatched = result.unmatched
 
     return result
