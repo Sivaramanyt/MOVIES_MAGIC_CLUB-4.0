@@ -21,12 +21,6 @@ def _is_admin(message: Message) -> bool:
     return message.from_user is not None and message.from_user.id in ids
 
 
-def _is_callback_admin(callback: CallbackQuery) -> bool:
-    configured = getattr(settings, "admin_user_ids", "") or os.getenv("ADMIN_USER_IDS", "")
-    ids = {int(v.strip()) for v in configured.split(",") if v.strip().isdigit()}
-    return callback.from_user.id in ids
-
-
 @router.message(Command("local_group"))
 async def local_group_handler(message: Message) -> None:
     if not _is_admin(message):
@@ -103,10 +97,6 @@ async def database_search_handler(message: Message) -> None:
 
 @router.callback_query(F.data.startswith("dbmovie:"))
 async def database_movie_handler(callback: CallbackQuery) -> None:
-    if not _is_callback_admin(callback) and callback.message is None:
-        await callback.answer("⛔ Not authorized.", show_alert=True)
-        return
-
     try:
         movie_id = int((callback.data or "dbmovie:0").split(":", 1)[1])
     except ValueError:
