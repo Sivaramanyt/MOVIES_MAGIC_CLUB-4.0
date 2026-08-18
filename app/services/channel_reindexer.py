@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 class ReindexResult:
     scanned: int = 0
     files: int = 0
+    documents: int = 0
+    videos: int = 0
+    photos: int = 0
+    other_media: int = 0
+    text_service: int = 0
     created: int = 0
     existing: int = 0
     matched: int = 0
@@ -62,8 +67,6 @@ async def index_telegram_file(
     )
 
     if not created:
-        # Existing rows are intentionally never duplicated. If already grouped,
-        # leave them untouched; otherwise this pass can safely retry TMDB work.
         if row.movie_id is not None:
             return "existing", False
 
@@ -95,6 +98,36 @@ async def index_telegram_file(
         return "unmatched", created
 
 
+def _classify_message(message) -> str:
+    """Classify Telegram history messages without changing file indexing behavior."""
+    if getattr(message, "document", None) is not None:
+        return "document"
+    if getattr(message, "video", None) is not None:
+        return "video"
+    if getattr(message, "photo", None) is not None:
+        return "photo"
+
+    other_media_fields = (
+        "audio",
+        "voice",
+        "animation",
+        "sticker",
+        "contact",
+        "location",
+        "venue",
+        "poll",
+        "dice",
+        "game",
+        "invoice",
+    )
+    if any(getattr(message, field, None) is not None for field in other_media_fields):
+        return "other_media"
+
+    # Remaining Telegram messages are text/captionless messages or service-style
+    # updates that have no supported media payload. They are not movie files.
+    return "text_service"
+
+
 async def reindex_messages(session: AsyncSession, messages) -> ReindexResult:
     result = ReindexResult()
     async for message in messages:
@@ -103,15 +136,32 @@ async def reindex_messages(session: AsyncSession, messages) -> ReindexResult:
 
         result.scanned += 1
         index_controller.progress.scanned = result.scanned
-        document = getattr(message, "document", None)
-        video = getattr(message, "video", None)
-        media = document or video
-        if media is None:
+
+        message_type = _classify_message(message)
+        if message_type == "document":
+            result.documents += 1
+            index_controller.progress.documents = result.documents
+        elif message_type == "video":
+            result.videos += 1
+            index_controller.progress.videos = result.videos
+        elif message_type == "photo":
+            result.photos += 1
+            index_controller.progress.photos = result.photos
+        elif message_type == "other_media":
+            result.other_media += 1
+            index_controller.progress.other_media = result.other_media
+        else:
+            result.text_service += 1
+            index_controller.progress.text_service = result.text_service
+
+        # Only documents and videos enter the existing movie-file pipeline.
+        if message_type not in {"document", "video"}:
             continue
 
         result.files += 1
         index_controller.progress.files = result.files
         try:
+            media = message.document or message.video
             telegram_file_id = f"mtproto:{media.id}:{getattr(media, 'access_hash', '')}"
             unique_id = str(media.id) if getattr(media, "id", None) is not None else None
             filename = getattr(getattr(message, "file", None), "name", None) or f"telegram_{message.id}.bin"
