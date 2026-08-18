@@ -59,6 +59,19 @@ class MovieFileRepository:
         await self.session.flush()
         return row, True
 
+    async def update_parsed_metadata(self, row: MovieFile, parsed: ParsedFilename) -> MovieFile:
+        """Update only parser-derived metadata; never changes identity or movie linkage."""
+        row.parsed_title = parsed.title or None
+        row.parsed_year = parsed.year
+        row.language = parsed.language
+        row.quality = parsed.quality
+        row.source = parsed.source
+        row.codec = parsed.codec
+        row.audio = parsed.audio
+        row.extension = parsed.extension
+        await self.session.flush()
+        return row
+
     async def attach_movie(self, row: MovieFile, movie: Movie) -> MovieFile:
         row.movie_id = movie.id
         await self.session.flush()
