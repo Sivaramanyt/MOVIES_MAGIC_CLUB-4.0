@@ -52,6 +52,31 @@ def _clean_title(text: str) -> str:
     return text.strip()
 
 
+def _strip_watermark_prefix(text: str) -> str:
+    """Remove known channel/watermark prefixes only when they are at the start.
+
+    This is intentionally allow-listed rather than removing arbitrary @/MM/www
+    tokens, so legitimate movie titles are not damaged.
+    """
+    prefixes = (
+        r"@Tamil_Link_Official",
+        r"@Cinematic_world",
+        r"www_1TamilMV_kids_",
+        r"MM_",
+        r"[MM]",
+    )
+    pattern = re.compile(
+        r"^\s*(?:" + "|".join(re.escape(prefix) for prefix in prefixes) + r")\s*",
+        re.IGNORECASE,
+    )
+
+    previous = None
+    while previous != text:
+        previous = text
+        text = pattern.sub("", text, count=1).strip()
+    return text
+
+
 def _strip_leading_metadata(text: str) -> str:
     """Remove release metadata that appears before the movie title."""
     pattern = re.compile(
@@ -93,9 +118,14 @@ def parse_filename(filename: str) -> ParsedFilename:
     codec = _find_case_insensitive(stem, CODECS)
     audio = _find_case_insensitive(stem, AUDIOS)
 
+    # Remove only known channel/watermark prefixes before title extraction.
+    # This prevents names such as "@Tamil_Link_Official - The Death of Robin Hood"
+    # from being parsed as the title "@" while preserving year/language/quality.
+    title_source = _strip_watermark_prefix(stem)
+
     # First remove leading release tags such as [Tamil] [1080p] before finding
     # the actual title. This fixes a common source of empty/garbled titles.
-    title_source = _strip_leading_metadata(stem)
+    title_source = _strip_leading_metadata(title_source)
     title_source = re.sub(r"^\s*[\[({]\s*", "", title_source)
 
     year_match_title = YEAR_RE.search(title_source)
