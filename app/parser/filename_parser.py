@@ -45,9 +45,29 @@ def _find_case_insensitive(text: str, values: list[str]) -> str | None:
 
 
 def _clean_title(text: str) -> str:
+    # Remove common leading/trailing release punctuation and bracket residue.
+    text = re.sub(r"[\[\](){}]", " ", text)
     text = re.sub(r"[._]+", " ", text)
     text = re.sub(r"\s+", " ", text).strip(" -_.")
     return text.strip()
+
+
+def _strip_leading_metadata(text: str) -> str:
+    """Remove release metadata that appears before the movie title."""
+    pattern = re.compile(
+        r"(?i)^\s*(?:[\[({]\s*)?"
+        r"(?:2160p|4k|1440p|1080p|720p|576p|480p|"
+        r"tamil|tam|telugu|tel|malayalam|mal|kannada|kan|"
+        r"hindi|hin|english|eng|bengali|ben|marathi|mar|punjabi|pun|"
+        r"web-dl|web[- ]?rip|bluray|bdrip|brrip|hdrip|hdtv|dvdrip|cam|hdtc|ts|"
+        r"x264|x265|h\.264|h264|h\.265|h265|hevc|av1|aac|ac3|ddp|dd\+|eac3|dts|mp3|truehd|atmos"
+        r")\b\s*(?:[\]})]\s*)?[-_. ]*"
+    )
+    previous = None
+    while previous != text:
+        previous = text
+        text = pattern.sub("", text).strip()
+    return text
 
 
 def parse_filename(filename: str) -> ParsedFilename:
@@ -73,14 +93,35 @@ def parse_filename(filename: str) -> ParsedFilename:
     codec = _find_case_insensitive(stem, CODECS)
     audio = _find_case_insensitive(stem, AUDIOS)
 
-    cut_points = [m.start() for m in (year_match, quality_match) if m]
+    # First remove leading release tags such as [Tamil] [1080p] before finding
+    # the actual title. This fixes a common source of empty/garbled titles.
+    title_source = _strip_leading_metadata(stem)
+    title_source = re.sub(r"^\s*[\[({]\s*", "", title_source)
+
+    year_match_title = YEAR_RE.search(title_source)
+    quality_match_title = QUALITY_RE.search(title_source)
+    cut_points = [m.start() for m in (year_match_title, quality_match_title) if m]
+
     for value in [language, source, codec, audio]:
         if value:
-            match = re.search(rf"(?i)(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", stem)
+            match = re.search(
+                rf"(?i)(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
+                title_source,
+            )
             if match:
                 cut_points.append(match.start())
-    title_end = min(cut_points) if cut_points else len(stem)
-    title = _clean_title(stem[:title_end])
+
+    title_end = min(cut_points) if cut_points else len(title_source)
+    title = _clean_title(title_source[:title_end])
+
+    # Some release names put metadata in a bracket immediately after the title.
+    # Remove that trailing metadata without damaging ordinary movie titles.
+    title = re.sub(
+        r"\s+[\[({]\s*(?:19|20)\d{2}|\s+[\[({]\s*(?:2160p|4k|1440p|1080p|720p|576p|480p)\b.*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    ).strip()
 
     return ParsedFilename(
         title=title,
