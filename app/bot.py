@@ -4,14 +4,16 @@ import os
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.filters import Command, CommandStart
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.movie_grouping import get_movie_group, group_file_count
+from app.database.models import MovieFile
 from app.database.repositories.movie_file_repository import MovieFileRepository
 from app.database.repositories.movie_repository import MovieRepository
 from app.database.session import SessionLocal
@@ -21,12 +23,76 @@ from app.tmdb import TMDBClient
 router = Router()
 settings = get_settings()
 logger = logging.getLogger(__name__)
+UNMATCHED_PAGE_SIZE = 10
 
 
 def is_admin(message: Message) -> bool:
     configured_ids = getattr(settings, "admin_user_ids", "") or os.getenv("ADMIN_USER_IDS", "")
     admin_ids = {int(value.strip()) for value in configured_ids.split(",") if value.strip().isdigit()}
     return message.from_user is not None and message.from_user.id in admin_ids
+
+
+def is_callback_admin(callback: CallbackQuery) -> bool:
+    configured_ids = getattr(settings, "admin_user_ids", "") or os.getenv("ADMIN_USER_IDS", "")
+    admin_ids = {int(value.strip()) for value in configured_ids.split(",") if value.strip().isdigit()}
+    return callback.from_user.id in admin_ids
+
+
+async def _unmatched_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup | None]:
+    page = max(0, page)
+    session: AsyncSession = SessionLocal()
+    try:
+        total = await session.scalar(
+            select(func.count(MovieFile.id)).where(MovieFile.movie_id.is_(None))
+        )
+        total = int(total or 0)
+        if total == 0:
+            return "❓ <b>Unmatched Movies</b>\n\n✅ No unmatched files found.", None
+
+        max_page = max(0, (total - 1) // UNMATCHED_PAGE_SIZE)
+        page = min(page, max_page)
+        rows = (
+            await session.scalars(
+                select(MovieFile)
+                .where(MovieFile.movie_id.is_(None))
+                .order_by(MovieFile.id.asc())
+                .offset(page * UNMATCHED_PAGE_SIZE)
+                .limit(UNMATCHED_PAGE_SIZE)
+            )
+        ).all()
+
+        start = page * UNMATCHED_PAGE_SIZE + 1
+        end = min(start + len(rows) - 1, total)
+        lines = [
+            "❓ <b>UNMATCHED MOVIES</b>",
+            "",
+            f"Showing <b>{start}–{end}</b> of <b>{total}</b>",
+            "",
+        ]
+        for index, row in enumerate(rows, start):
+            title = row.parsed_title or "Unknown title"
+            year = f" ({row.parsed_year})" if row.parsed_year else ""
+            filename = row.filename
+            if len(filename) > 90:
+                filename = filename[:87] + "..."
+            lines.append(f"<b>{index}.</b> {title}{year}")
+            lines.append(f"   <code>{filename}</code>")
+            if row.language or row.quality:
+                details = " · ".join(value for value in (row.language, row.quality) if value)
+                lines.append(f"   {details}")
+
+        buttons: list[list[InlineKeyboardButton]] = []
+        navigation: list[InlineKeyboardButton] = []
+        if page > 0:
+            navigation.append(InlineKeyboardButton(text="⬅️ Previous", callback_data=f"unmatched:{page - 1}"))
+        if page < max_page:
+            navigation.append(InlineKeyboardButton(text="Next ➡️", callback_data=f"unmatched:{page + 1}"))
+        if navigation:
+            buttons.append(navigation)
+        buttons.append([InlineKeyboardButton(text="🔄 Refresh", callback_data=f"unmatched:{page}")])
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=buttons)
+    finally:
+        await session.close()
 
 
 @router.message(CommandStart())
@@ -211,6 +277,39 @@ async def group_test_handler(message: Message) -> None:
         await message.answer("❌ Movie group test failed. Check Koyeb logs.")
     finally:
         await session.close()
+
+
+@router.message(Command("unmatched"))
+async def unmatched_handler(message: Message) -> None:
+    """Read-only mobile-friendly view of files that have no TMDB/movie group."""
+    if not is_admin(message):
+        await message.answer("⛔ You are not authorized to view unmatched files.")
+        return
+
+    await message.answer("🔎 Loading unmatched movies…")
+    try:
+        text, keyboard = await _unmatched_page(0)
+        await message.answer(text, reply_markup=keyboard)
+    except Exception:
+        logger.exception("Unmatched listing failed")
+        await message.answer("❌ Could not load unmatched files. Check Koyeb logs.")
+
+
+@router.callback_query(F.data.startswith("unmatched:"))
+async def unmatched_navigation_handler(callback: CallbackQuery) -> None:
+    if not is_callback_admin(callback):
+        await callback.answer("⛔ Not authorized.", show_alert=True)
+        return
+
+    try:
+        page = int((callback.data or "unmatched:0").split(":", 1)[1])
+        text, keyboard = await _unmatched_page(page)
+        if callback.message:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.answer()
+    except Exception:
+        logger.exception("Unmatched navigation failed")
+        await callback.answer("❌ Failed to load page.", show_alert=True)
 
 
 async def _handle_telegram_file(message: Message) -> None:
