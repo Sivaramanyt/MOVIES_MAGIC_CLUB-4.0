@@ -28,4 +28,3 @@ The project is intentionally being built in stages. Telegram update delivery and
 
 Movie indexing and TMDB functionality will be added only after the Telegram foundation is proven healthy.
 
-
