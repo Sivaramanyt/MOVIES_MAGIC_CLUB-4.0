@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     telegram_api_hash: SecretStr = SecretStr("")
     reindex_session_string: SecretStr = SecretStr("")
     reindex_channel_id: int | None = None
-    reindex_max_messages: int = 1000
+    reindex_max_messages: int = 10000
     app_host: str = "0.0.0.0"
     app_port: int = 8000
     log_level: str = "INFO"
