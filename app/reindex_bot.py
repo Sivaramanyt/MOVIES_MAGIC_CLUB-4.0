@@ -36,7 +36,12 @@ def _progress_text(prefix: str = "📊 <b>Index Status</b>") -> str:
         f"Channel: <code>{p.channel_id or '-'}</code>\n"
         f"Limit: <b>{p.limit or '-'}</b>\n"
         f"Scanned: <b>{p.scanned}</b>\n"
-        f"Files: <b>{p.files}</b>\n"
+        f"Documents: <b>{p.documents}</b>\n"
+        f"Videos: <b>{p.videos}</b>\n"
+        f"Photos: <b>{p.photos}</b>\n"
+        f"Other media: <b>{p.other_media}</b>\n"
+        f"Text/service: <b>{p.text_service}</b>\n"
+        f"Movie files indexed: <b>{p.files}</b>\n"
         f"New: <b>{p.created}</b>\n"
         f"Existing: <b>{p.existing}</b>\n"
         f"TMDB matched: <b>{p.matched}</b>\n"
@@ -129,9 +134,14 @@ async def reindex_handler(message: Message) -> None:
             p = index_controller.snapshot()
             stopped = p.stop_requested
             await message.answer(
-                "🛑 <b>Bulk index stopped safely</b>" if stopped else "📚 <b>Bulk Channel Index Complete</b>"
+                ("🛑 <b>Bulk index stopped safely</b>" if stopped else "📚 <b>Bulk Channel Index Complete</b>")
                 + "\n\n"
                 f"Messages scanned: {result.scanned}\n"
+                f"Documents: {result.documents}\n"
+                f"Videos: {result.videos}\n"
+                f"Photos: {result.photos}\n"
+                f"Other media: {result.other_media}\n"
+                f"Text/service: {result.text_service}\n"
                 f"Movie files found: {result.files}\n"
                 f"New records: {result.created}\n"
                 f"Already indexed: {result.existing}\n"
