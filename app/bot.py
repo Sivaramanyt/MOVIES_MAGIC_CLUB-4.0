@@ -7,14 +7,15 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from aiogram.filters import Command, CommandStart
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import get_settings
 from app.database.file_intake_diagnostics import run_file_intake_smoke_test
 from app.database.repository_diagnostics import run_movie_repository_smoke_test
 from app.database.movie_grouping import get_movie_group, group_file_count
-from app.database.models import MovieFile
+from app.database.models import Movie, MovieFile
 from app.database.repositories.movie_file_repository import MovieFileRepository
 from app.database.repositories.movie_repository import MovieRepository
 from app.database.session import SessionLocal
@@ -44,19 +45,22 @@ async def _unmatched_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup | No
     page = max(0, page)
     session: AsyncSession = SessionLocal()
     try:
-        total = await session.scalar(
-            select(func.count(MovieFile.id)).where(MovieFile.movie_id.is_(None))
+        base = select(MovieFile.id).select_from(MovieFile).outerjoin(Movie, MovieFile.movie_id == Movie.id).where(
+            or_(MovieFile.movie_id.is_(None), Movie.tmdb_id.is_(None))
         )
+        total = await session.scalar(select(func.count()).select_from(base.subquery()))
         total = int(total or 0)
         if total == 0:
-            return "❓ <b>Unmatched Movies</b>\n\n✅ No unmatched files found.", None
+            return "❓ <b>Unmatched Movies</b>\n\n✅ No files without a TMDB identity remain.", None
 
         max_page = max(0, (total - 1) // UNMATCHED_PAGE_SIZE)
         page = min(page, max_page)
         rows = (
             await session.scalars(
                 select(MovieFile)
-                .where(MovieFile.movie_id.is_(None))
+                .select_from(MovieFile)
+                .outerjoin(Movie, MovieFile.movie_id == Movie.id)
+                .where(or_(MovieFile.movie_id.is_(None), Movie.tmdb_id.is_(None)))
                 .order_by(MovieFile.id.asc())
                 .offset(page * UNMATCHED_PAGE_SIZE)
                 .limit(UNMATCHED_PAGE_SIZE)
@@ -66,7 +70,7 @@ async def _unmatched_page(page: int = 0) -> tuple[str, InlineKeyboardMarkup | No
         start = page * UNMATCHED_PAGE_SIZE + 1
         end = min(start + len(rows) - 1, total)
         lines = [
-            "❓ <b>UNMATCHED MOVIES</b>",
+            "❓ <b>UNMATCHED / LOCAL DATABASE MOVIES</b>",
             "",
             f"Showing <b>{start}–{end}</b> of <b>{total}</b>",
             "",
@@ -120,7 +124,7 @@ async def _tmdb_match_with_retries(title: str, year: int | None, attempts: int =
 
 @router.message(Command("rematch"))
 async def rematch_handler(message: Message) -> None:
-    """Safely reparse and retry TMDB matching for currently-unmatched records only."""
+    """Safely reparse and retry TMDB matching for records without a TMDB identity."""
     global REMATCH_RUNNING
 
     if not is_admin(message):
@@ -142,25 +146,28 @@ async def rematch_handler(message: Message) -> None:
     await message.answer(
         "🔄 <b>Unmatched rematch started</b>\n\n"
         f"Batch size: <b>{limit}</b>\n"
-        "Matched records will be left untouched.\n"
-        "Existing channel + message identity is unchanged.\n\n"
+        "TMDB-identified records will be left untouched.\n"
+        "Local database-first groups can be safely promoted if TMDB later matches them.\n\n"
         "⏳ Re-parsing with the latest prefix rules…"
     )
 
     session: AsyncSession = SessionLocal()
-    processed = reparsed = matched = unmatched = failed = 0
+    processed = reparsed = matched = local_grouped = unmatched = failed = 0
     try:
         rows = (
             await session.scalars(
                 select(MovieFile)
-                .where(MovieFile.movie_id.is_(None))
+                .options(selectinload(MovieFile.movie))
+                .select_from(MovieFile)
+                .outerjoin(Movie, MovieFile.movie_id == Movie.id)
+                .where(or_(MovieFile.movie_id.is_(None), Movie.tmdb_id.is_(None)))
                 .order_by(MovieFile.id.asc())
                 .limit(limit)
             )
         ).all()
 
         if not rows:
-            await message.answer("🔄 <b>Rematch complete</b>\n\n✅ No unmatched records remain.")
+            await message.answer("🔄 <b>Rematch complete</b>\n\n✅ No records without a TMDB identity remain.")
             return
 
         file_repository = MovieFileRepository(session)
@@ -169,15 +176,10 @@ async def rematch_handler(message: Message) -> None:
         for row in rows:
             processed += 1
             try:
-                # Re-read the current linkage defensively. Already-matched rows are
-                # never modified even if another worker matched them meanwhile.
-                if row.movie_id is not None:
+                if row.movie_id is not None and row.movie is not None and row.movie.tmdb_id is not None:
                     continue
 
                 parsed = parse_filename(row.filename)
-
-                # Persist parser metadata independently first. If TMDB is down,
-                # the corrected parser result is still retained for the next run.
                 await session.begin_nested()
                 await file_repository.update_parsed_metadata(row, parsed)
                 await session.commit()
@@ -195,11 +197,14 @@ async def rematch_handler(message: Message) -> None:
                     continue
 
                 if best is None:
+                    local_movie, _ = await movie_repository.get_or_create_local_group(parsed.title, parsed.year)
+                    await file_repository.attach_movie(row, local_movie)
+                    await movie_repository.add_alias(local_movie, parsed.title)
+                    await session.commit()
+                    local_grouped += 1
                     unmatched += 1
                     continue
 
-                # The existing TMDB ID based grouping path is reused. No new
-                # identity key or duplicate file record is created.
                 movie, _ = await movie_repository.get_or_create_by_tmdb(
                     tmdb_id=best.tmdb_id,
                     title=best.title,
@@ -225,9 +230,10 @@ async def rematch_handler(message: Message) -> None:
             f"Processed: <b>{processed}</b>\n"
             f"Re-parsed: <b>{reparsed}</b>\n"
             f"TMDB matched + grouped: <b>{matched}</b>\n"
-            f"Still unmatched: <b>{unmatched}</b>\n"
+            f"Local database groups: <b>{local_grouped}</b>\n"
+            f"Still without TMDB identity: <b>{unmatched}</b>\n"
             f"Failed: <b>{failed}</b>\n\n"
-            "✅ Matched records were not reprocessed.\n"
+            "✅ TMDB-matched records were not reprocessed.\n"
             "✅ No duplicate file records were created.\n"
             "✅ Parser metadata is safe to retry."
         )
@@ -349,7 +355,6 @@ async def tmdb_test_handler(message: Message) -> None:
 
 @router.message(Command("match_test"))
 async def match_test_handler(message: Message) -> None:
-    """Mobile-friendly end-to-end parser + TMDB match test without database writes."""
     if not is_admin(message):
         await message.answer("⛔ You are not authorized to run this test.")
         return
@@ -380,7 +385,6 @@ async def match_test_handler(message: Message) -> None:
 
 @router.message(Command("group_test"))
 async def group_test_handler(message: Message) -> None:
-    """Mobile-friendly check of the TMDB-backed movie group and linked files."""
     if not is_admin(message):
         await message.answer("⛔ You are not authorized to run this test.")
         return
@@ -407,7 +411,7 @@ async def group_test_handler(message: Message) -> None:
             "🧪 <b>Movie Group Test</b>",
             "",
             f"🎬 {movie.title} ({movie.year or '?'})",
-            f"TMDB ID: <code>{movie.tmdb_id}</code>",
+            f"TMDB ID: <code>{movie.tmdb_id or 'Local DB'}</code>",
             f"Files grouped: <b>{group_file_count(movie)}</b>",
             "",
         ]
@@ -415,7 +419,7 @@ async def group_test_handler(message: Message) -> None:
             lines.append(f"{index}. {file.filename} — {file.quality or '?'} — {file.language or '?'}")
         if len(movie.files) > 10:
             lines.append(f"…and {len(movie.files) - 10} more")
-        lines.append("\nGrouping key: TMDB ID ✅")
+        lines.append("\nGrouping key: TMDB ID or normalized title + year ✅")
         await message.answer("\n".join(lines))
     except Exception:
         logger.exception("Movie group test failed")
@@ -426,7 +430,6 @@ async def group_test_handler(message: Message) -> None:
 
 @router.message(Command("unmatched"))
 async def unmatched_handler(message: Message) -> None:
-    """Read-only mobile-friendly view of files that have no TMDB/movie group."""
     if not is_admin(message):
         await message.answer("⛔ You are not authorized to view unmatched files.")
         return
@@ -470,6 +473,7 @@ async def _handle_telegram_file(message: Message) -> None:
             file = message.video
             filename = f"video_{message.message_id}.mp4"
             file_id, unique_id = file.file_id, file.file_unique_id
+            file_size, mime_type = file.file_id, file.file_unique_id
             file_size, mime_type = file.file_size, file.mime_type or "video/mp4"
         else:
             return
@@ -495,8 +499,8 @@ async def _handle_telegram_file(message: Message) -> None:
         if parsed.title:
             try:
                 best, _ = await TMDBClient().match_movie(parsed.title, parsed.year)
+                movie_repository = MovieRepository(session)
                 if best:
-                    movie_repository = MovieRepository(session)
                     movie, _ = await movie_repository.get_or_create_by_tmdb(
                         tmdb_id=best.tmdb_id,
                         title=best.title,
@@ -511,9 +515,14 @@ async def _handle_telegram_file(message: Message) -> None:
                     await file_repository.attach_movie(row, movie)
                     await movie_repository.add_alias(movie, parsed.title)
                     match_status = f"✅ Matched + grouped: {movie.title} ({movie.year or '?'})"
+                else:
+                    movie, _ = await movie_repository.get_or_create_local_group(parsed.title, parsed.year)
+                    await file_repository.attach_movie(row, movie)
+                    await movie_repository.add_alias(movie, parsed.title)
+                    match_status = f"📚 Stored in database group: {movie.title} ({movie.year or '?'})"
             except Exception:
                 logger.exception("Automatic TMDB matching failed for file %s", filename)
-                match_status = "⚠️ Stored, TMDB matching/grouping failed"
+                match_status = "⚠️ Stored, TMDB matching failed"
 
         await session.commit()
         await message.answer(
@@ -526,7 +535,7 @@ async def _handle_telegram_file(message: Message) -> None:
             f"Source: {parsed.source or 'Unknown'}\n\n"
             "Database: ✅\n"
             f"TMDB: {match_status}\n"
-            "Grouping: TMDB ID based ✅"
+            "Grouping: Database-first + optional TMDB ✅"
         )
     except Exception:
         await session.rollback()
