@@ -10,9 +10,11 @@ class Movie(Base):
     __tablename__ = "movies"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    tmdb_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False, index=True)
+    tmdb_id: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     original_title: Mapped[str | None] = mapped_column(String(500))
+    normalized_title: Mapped[str | None] = mapped_column(String(500), index=True)
+    group_key: Mapped[str | None] = mapped_column(String(1000), unique=True, index=True)
     release_date: Mapped[str | None] = mapped_column(String(20))
     year: Mapped[int | None] = mapped_column(Integer, index=True)
     overview: Mapped[str | None] = mapped_column(Text)
