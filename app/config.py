@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     admin_user_ids: str = ""
     telegram_api_id: int = 0
     telegram_api_hash: SecretStr = SecretStr("")
+    reindex_session_string: SecretStr = SecretStr("")
     reindex_channel_id: int | None = None
     reindex_max_messages: int = 1000
     app_host: str = "0.0.0.0"
@@ -45,7 +46,12 @@ class Settings(BaseSettings):
 
     @property
     def reindex_configured(self) -> bool:
-        return self.telegram_api_id > 0 and bool(self.telegram_api_hash.get_secret_value()) and self.reindex_channel_id is not None
+        return (
+            self.telegram_api_id > 0
+            and bool(self.telegram_api_hash.get_secret_value())
+            and bool(self.reindex_session_string.get_secret_value())
+            and self.reindex_channel_id is not None
+        )
 
 
 @lru_cache(maxsize=1)
